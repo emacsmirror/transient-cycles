@@ -5,7 +5,7 @@
 ;; Author: Sean Whitton <spwhitton@spwhitton.name>
 ;; Maintainer: Sean Whitton <spwhitton@spwhitton.name>
 ;; Package-Requires: ((emacs "27.1"))
-;; Version: 1.0
+;; Version: 1.1
 ;; URL: https://git.spwhitton.name/dotfiles/tree/.emacs.d/site-lisp/transient-cycles.el
 ;; Keywords: buffer, window, minor-mode, convenience
 
@@ -67,6 +67,9 @@
 
 ;;; News:
 
+;; Ver 1.1 2025/02/25 Sean Whitton
+;;     Replace uses of `when-let' with `when-let*'.
+;;
 ;; Ver 1.0 2022/04/10 Sean Whitton
 ;;     Initial release.
 ;;     Thanks to Protesilaos Stavrou for testing and docs feedback.
@@ -193,10 +196,10 @@ argument to `set-transient-map'."
 				       (eq 'interactive (caar body)))
 				  body
 				(cons (interactive-form original*) body))))))
-	      (when-let ((,cycler (funcall ,cycler-generator ,arg))
-			 (,tmap (make-sparse-keymap))
-			 (,kforwards ,cycle-forwards-key)
-			 (,kbackwards ,cycle-backwards-key))
+	      (when-let* ((,cycler (funcall ,cycler-generator ,arg))
+			  (,tmap (make-sparse-keymap))
+			  (,kforwards ,cycle-forwards-key)
+			  (,kbackwards ,cycle-backwards-key))
 		;; It might be additionally useful to bind something in the
 		;; transient map to kill the current buffer and cycle once.
 		;;
@@ -236,8 +239,8 @@ ACTION is a form in terms of `buffer', which should cycle to
 	(buffers (gensym))
 	(buffers-pos (gensym)))
     `(lambda (ret-val)
-       (when-let ((,buffers ,ring)
-		  (,buffers-pos ,start))
+       (when-let* ((,buffers ,ring)
+		   (,buffers-pos ,start))
 	 (lambda (,count)
 	   (interactive "p")
 	   (cl-incf ,buffers-pos ,count)
