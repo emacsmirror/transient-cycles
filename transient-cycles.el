@@ -1,13 +1,13 @@
 ;;; transient-cycles.el --- Define command variants with transient cycling  -*- lexical-binding: t -*-
 
-;; Copyright (C) 2020-2022  Free Software Foundation, Inc.
+;; Copyright (C) 2020-2025  Free Software Foundation, Inc.
 
 ;; Author: Sean Whitton <spwhitton@spwhitton.name>
 ;; Maintainer: Sean Whitton <spwhitton@spwhitton.name>
-;; Package-Requires: ((emacs "27.1"))
-;; Version: 1.1
+;; Package-Requires: ((emacs "29.1"))
+;; Version: 2.0
 ;; URL: https://git.spwhitton.name/dotfiles/tree/.emacs.d/site-lisp/transient-cycles.el
-;; Keywords: buffer, window, minor-mode, convenience
+;; Keywords: buffer, window, processes, minor-mode, convenience
 
 ;; This file is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -24,6 +24,44 @@
 
 ;;; Commentary:
 
+;; This package provides four global minor modes:
+;;
+;; - `transient-cycles-buffer-siblings-mode'
+;;   Enhances buffer switching commands by adding transient cycling.
+;;   After typing 'C-x b', 'C-x 4 C-o', 'C-h i' and others, you can use
+;;   <left>/<right> to switch between other closely related buffers.
+;;   For example, after using 'C-x b' to switch to a buffer which has a
+;;   (possibly indirect) clone, <right> will switch to the clone, and a
+;;   subsequent <left> will take you back.
+;;
+;; - `transient-cycles-window-buffers-mode'
+;;   Enhances 'C-x <left>' and 'C-x <right>' by adding transient cycling.
+;;   After typing one of these commands, you can use <left>/<right> to move
+;;   further forwards or backwards in a list of the buffer's previous,
+;;   current and next buffers.  But this list is virtual: after exiting
+;;   transient cycling, it is as though you used an exact numeric prefix
+;;   argument to 'C-x <left>' or 'C-x <right>' to go to the final destination
+;;   buffer in just one command, without visiting the others.
+;;
+;; - `transient-cycles-tab-bar-mode'
+;;   Enhances 'C-x t o' and 'C-x t O' by adding transient cycling.
+;;   After typing one of these commands, you can use <left>/<right> to move
+;;   further in the list of tabs.  But after exiting transient cycling, it is
+;;   as though you did not visit the intervening tabs and went straight to
+;;   your destination tab.  In particular, 'M-x tab-recent' toggles between
+;;   the initial and final tabs.
+;;
+;; - `transient-cycles-shells-mode'
+;;   Enhances 'C-x p s' (or C-x p e) with transient cycling, and completely
+;;   replaces 'M-!', 'M-&', and Dired's '!' and '&' commands.  These new
+;;   commands all switch to shell buffers instead of doing minibuffer
+;;   prompting, automatically starting fresh shell buffers when others are
+;;   busy running commands.  In addition, after switching to a shell, you can
+;;   use <left>/<right> to quickly switch to other shell buffers.
+;;   There is support for both `shell-mode' inferior shells and Eshell.
+;;
+;; Further discussion:
+;;
 ;; Many commands can be conceptualised as selecting an item from an ordered
 ;; list or ring.  Sometimes after running such a command, you find that the
 ;; item selected is not the one you would have preferred, but the preferred
@@ -67,6 +105,12 @@
 
 ;;; News:
 
+;; Ver 2.0 2025/06/25 Sean Whitton
+;;     New minor mode, `transient-cycles-shells-mode'.
+;;     New macro `transient-cycles-define-buffer-switch'.
+;;     New command to restart transient cycling (not bound by default):
+;;     `transient-cycles-cmd-transient-cycles-siblings-from-here'.
+;;
 ;; Ver 1.1 2025/02/25 Sean Whitton
 ;;     Replace uses of `when-let' with `when-let*'.
 ;;
@@ -113,7 +157,7 @@ commands to which transient cycling has been added."
 COMMANDS with transient cycling as supplied by CYCLER-GENERATOR.
 
 BINDINGS are established by means of `let*' at the beginning of
-each command variant.  Thus each command variant,
+each command variant.  Thus for each command variant,
 CYCLER-GENERATOR and ON-EXIT all close over each of BINDINGS.
 The storage is intended to last for the duration of transient
 cycling, and may be used for cycling state or to save values from
@@ -156,8 +200,8 @@ time the transient map is established, so it is possible to
 compute cycling keys from the binding used to invoke the command.
 For example, for CYCLE-FORWARDS-KEY, you might have
 
-    (cond ((memq last-command-event '(up down)) [down])
-	  ((memq last-command-event '(left right)) [right])
+    (cond ((memq last-command-event \\='(up down)) [down])
+	  ((memq last-command-event \\='(left right)) [right])
 	  (t transient-cycles-default-cycle-forwards-key))
 
 ON-EXIT, if present, is wrapped in a lambda expression with no
@@ -184,10 +228,19 @@ argument to `set-transient-map'."
 				       (t original))
 	 for name
 	 = (intern (format "transient-cycles-cmd-%s" (symbol-name original*)))
+	 for original*-name = (symbol-name original*)
+	 for doc
+	 = (if (stringp (car body))
+	       (pop body)
+	     (format "Like `%s',%sbut augmented with transient cycling."
+		     original*-name
+		     (if (length> original*-name
+				  (- emacs-lisp-docstring-fill-column 45))
+			 "\n"
+		       "\s")))
 	 collect
 	 `(defun ,name ()
-	    ,(format "Like `%s', but augmented with transient cycling."
-		     (symbol-name original*))
+	    ,doc
 	    (interactive)
 	    (let* (,@bindings
 		   (,arg (call-interactively
@@ -211,7 +264,7 @@ argument to `set-transient-map'."
 					       (funcall ,cycler ,arg)))
 		(define-key ,tmap ,kbackwards (lambda (,arg)
 						(interactive "p")
-						(funcall ,cycler (* -1 ,arg))))
+						(funcall ,cycler (- ,arg))))
 		(when transient-cycles-show-cycling-keys
 		  (message "Cycle forwards with %s, backwards with %s"
 			   (key-description ,kforwards)
@@ -220,6 +273,11 @@ argument to `set-transient-map'."
 	 when key collect `(define-key ,keymap ,key #',name))))
 (put 'transient-cycles-define-commands 'common-lisp-indent-function
      '(4 (&whole 2 &rest (&whole 1 4 &body)) &body))
+
+(defvar-local transient-cycles--last-buffers-ring nil
+  "Ring of buffers used in last transient cycling that included this buffer.")
+(defvar-local transient-cycles--last-buffers-pos nil
+  "Position of this buffer in `transient-cycles--last-buffers-ring'.")
 
 (cl-defmacro transient-cycles-buffer-ring-cycler
     (&key (start 0)
@@ -235,17 +293,81 @@ will hold the return value of calling the command variant as
 described in the docstring of `transient-cycles-define-keys'.
 ACTION is a form in terms of `buffer', which should cycle to
 `buffer' in the relevant sense."
-  (let ((count (gensym))
-	(buffers (gensym))
-	(buffers-pos (gensym)))
+  (cl-with-gensyms (count buffers buffers-pos)
     `(lambda (ret-val)
        (when-let* ((,buffers ,ring)
 		   (,buffers-pos ,start))
+	 ;; Set these in the index zero buffer (this will often be the current
+	 ;; buffer, but not always) and in buffers we actually cycle through.
+	 ;; The idea is that buffers the user doesn't see don't get new values
+	 ;; for these vars in order to preserve any they might already have.
+	 (with-current-buffer (ring-ref ,buffers ,buffers-pos)
+	   (setq-local transient-cycles--last-buffers-ring ,buffers
+		       transient-cycles--last-buffers-pos ,buffers-pos))
 	 (lambda (,count)
 	   (interactive "p")
 	   (cl-incf ,buffers-pos ,count)
 	   (let ((buffer (ring-ref ,buffers ,buffers-pos)))
+	     (with-current-buffer buffer
+	       (setq-local transient-cycles--last-buffers-ring ,buffers
+			   transient-cycles--last-buffers-pos ,buffers-pos))
 	     ,action))))))
+
+(defmacro transient-cycles-define-buffer-switch
+    (commands &rest keyword-arguments)
+  "`transient-cycles-define-commands' but with an implicit CYCLER-GENERATOR.
+The return value of each command variant defined by COMMANDS determines a
+ring of buffers.  The command variant may either return a ring of buffers
+directly, or return a buffer or a window.  In the latter two cases, the
+ring of buffers is the buffer siblings of the return value, in the sense of
+`transient-cycles-buffer-siblings-ring'.
+The cycler generator implicitly provided by this macro returns a cycler which
+cycles through the ring of buffers, displaying each one in the selected window
+(or if the command variant returned a window, in that window)."
+  (declare (indent 0))
+  (cl-with-gensyms (window prev-buffers)
+    `(transient-cycles-define-commands (,window ,prev-buffers)
+       ,(cl-loop for command in commands
+		 for (original lambda . body)
+		   = (if (proper-list-p command) command
+		       `(,command (&rest args)
+			  ,(interactive-form (cdr command))
+			  (apply #',(cdr command) args)))
+		 collect `(,original ,lambda
+			   ,@(and (stringp (car body))
+				  (list (pop body)))
+			   ,@(and (listp (car body))
+				  (eq (caar body) 'interactive)
+				  (list (pop body)))
+			   (let ((ret-val ,(macroexp-progn body)))
+			     (when (windowp ret-val)
+			       (setq ,window ret-val))
+			     (setq ,prev-buffers
+				   (window-prev-buffers ,window))
+			     ret-val)))
+       (transient-cycles-buffer-ring-cycler
+	:ring (cl-etypecase ret-val
+		(buffer (transient-cycles-buffer-siblings-ring ret-val))
+		(window (transient-cycles-buffer-siblings-ring
+			 (window-buffer ret-val)))
+		(ring ret-val)
+		(null nil))
+	:action (if (windowp ret-val)
+		    (with-selected-window ret-val
+		      (let ((display-buffer-overriding-action
+			     '((display-buffer-same-window)
+			       (inhibit-same-window . nil))))
+			(display-buffer buffer)))
+		  (switch-to-buffer buffer t t)))
+       :on-exit (if ,window
+		    (progn (set-window-next-buffers ,window nil)
+			   (set-window-prev-buffers ,window ,prev-buffers))
+		  (switch-to-buffer (current-buffer) nil t)
+		  (set-window-next-buffers nil nil)
+		  (set-window-prev-buffers nil ,prev-buffers))
+       . ,keyword-arguments)))
+(put 'transient-cycles-define-buffer-switch 'common-lisp-indent-function
+     '((&whole 2 &rest (&whole 1 4 &body)) &body))
 
 (defcustom transient-cycles-buffer-siblings-major-modes
   '(("\\`*unsent mail" . message-mode))
@@ -257,7 +379,8 @@ should be associated with families of clones as generated by
   :type '(alist :key-type regexp :value-type symbol)
   :group 'transient-cycles)
 
-(defun transient-cycles-buffer-siblings-ring (buffer)
+(defun transient-cycles-buffer-siblings-ring (buffer
+					      &optional old-ring old-pos)
   "Return ring of BUFFER clones and buffers sharing the clones' major mode.
 BUFFER itself is the first element of the ring, followed by the
 clones of BUFFER, and then buffers merely sharing the major mode
@@ -273,7 +396,15 @@ as the same naming scheme is used.  This is desirable for
 The singular major mode of the family of clones is determined
 using heuristics, as it is expected that clones of a buffer may
 have different major modes: visiting one file with more than one
-major mode is one of the primary uses of indirect clones."
+major mode is one of the primary uses of indirect clones.
+
+Optional arguments OLD-RING and OLD-POS, if non-nil, are a ring of buffers
+and an index into that ring, respectively.  The ring should normally
+include BUFFER.  OLD-RING is divided into two lists of buffers (skipping
+killed buffers): elements with indexes greater than or equal to OLD-POS,
+and elements with indexes strictly less than OLD-POS.  The first list
+becomes the first elements of the ring this function returns, instead of
+BUFFER, and the second list becomes the last elements of the ring."
   (let* ((clones-hash (make-hash-table))
 	 (root-name (buffer-name buffer))
 	 (root-name (if (string-match "\\`\\(.+\\)<[0-9]+>\\'" root-name)
@@ -314,18 +445,27 @@ major mode is one of the primary uses of indirect clones."
 				(with-current-buffer buffer major-mode))
 		    when (string-match root-root-name mode) return mode)
 		   ;; Fallback.
-		   (with-current-buffer buffer major-mode))))
+		   (with-current-buffer buffer major-mode)))
+	 (old-elts (and old-ring
+			(cl-delete-if-not #'buffer-live-p
+					  (ring-elements old-ring))))
+	 (head+tail-len (if old-ring (length old-elts) 1))
+	 (old-pos (or old-pos 0))
+	 (head (if old-ring
+		   (nthcdr old-pos old-elts)
+		 (list buffer)))
+	 (tail (ntake old-pos old-elts)))
     (dolist (buffer buffers) (puthash buffer t clones-hash))
     (dolist (buffer (buffer-list))
       (with-current-buffer buffer
 	(when (and (eq mode major-mode) (not (gethash buffer clones-hash)))
 	  (push buffer buffers))))
-    (let ((ring (make-ring (length buffers)))
-	  ;; Often BUFFER will be the most recently selected buffer and so the
-	  ;; car of the buffer list, but not always, and we always want
-	  ;; cycling to begin from BUFFER.
-	  (reversed (nreverse (cons buffer (remove buffer buffers)))))
-      (dolist (buffer reversed ring) (ring-insert ring buffer)))))
+    (setq buffers (cl-nset-difference buffers head))
+    (setq buffers (cl-nset-difference buffers tail))
+    (let ((ring (make-ring (+ (length buffers) head+tail-len))))
+      (dolist (buffer (nreverse (nconc head buffers tail)))
+	(ring-insert ring buffer))
+      ring)))
 
 
 ;;;; Minor modes
@@ -347,7 +487,7 @@ defined by `transient-cycles-buffer-siblings-mode'."
 
 ;;;###autoload
 (define-minor-mode transient-cycles-buffer-siblings-mode
-    "Enhance buffer switching commands by adding transient cycling.
+  "Enhance buffer switching commands by adding transient cycling.
 
 Augments a number of standard buffer switching commands.  After
 typing \\[switch-to-buffer], \\[display-buffer], \\[info] and
@@ -357,6 +497,8 @@ some others, you can use the keys
 different, relevantly similar buffer to select or display
 instead.  See `transient-cycles-buffer-siblings-ring' for details
 of the notion of similarity employed.
+
+See also `transient-cycles-cmd-transient-cycles-siblings-from-here'.
 
 The purpose of this mode is to make it easier to handle large
 numbers of similarly-named buffers without having to take the
@@ -371,6 +513,10 @@ to switch to any `Info-mode' buffer you can quickly cycle through
 to the intended target."
   :lighter nil :keymap transient-cycles-buffer-siblings-mode-map :global t
   :group 'transient-cycles)
+
+;; It would be possible to rewrite the following two forms with
+;; `transient-cycles-define-buffer-switch'.  Leaving them like this serves as
+;; a nice usage example for `transient-cycles-define-commands', though.
 
 (transient-cycles-define-commands (prev-buffers)
   (([remap switch-to-buffer] (buffer &optional _norecord force-same-window)
@@ -418,6 +564,65 @@ to the intended target."
   :cycle-forwards-key transient-cycles-buffer-siblings-cycle-forwards-key
   :cycle-backwards-key transient-cycles-buffer-siblings-cycle-backwards-key)
 
+(transient-cycles-define-commands (prev-buffers)
+  ((transient-cycles-siblings-from-here ()
+     "Start or restart transient cycling among the current buffer's siblings.
+
+This is like \\<transient-cycles-buffer-siblings-mode-map>\\[transient-cycles-cmd-switch-to-buffer] under `transient-cycles-buffer-siblings-mode' except
+that cycling always begins with the current buffer.  In addition, if there
+was a previous instance of transient cycling among buffers that cycled
+through or ended in this buffer, then that transient cycling is restarted.
+This works for all commands whose transient cycling was implemented with
+`transient-cycles-buffer-ring-cycler'; this includes all commands from
+`transient-cycles-buffer-siblings-mode' and `transient-cycles-shells-mode'.
+
+This command is not bound by any of the minor modes included with the
+Transient Cycles package.  Therefore, to use this command, you'll need to
+first bind it to two key sequences, ending in each of
+`transient-cycles-buffer-siblings-cycle-forwards-key' and
+`transient-cycles-buffer-siblings-cycle-backwards-key'.
+For example, with the default cycling keys, you could use
+
+    (global-set-key [?\\C-c left]
+		    #\\='transient-cycles-cmd-transient-cycles-siblings-from-here)
+    (global-set-key [?\\C-c right]
+		    #\\='transient-cycles-cmd-transient-cycles-siblings-from-here)
+
+You can usefully prefix this command with \\[other-window-prefix], \\[other-frame-prefix] etc. to
+(re)start cycling elsewhere."
+     (interactive)
+     (unless
+	 (member (vector last-command-event)
+		 (list transient-cycles-buffer-siblings-cycle-forwards-key
+		       transient-cycles-buffer-siblings-cycle-backwards-key))
+       (error "This command's binding must end in existing cycling key"))
+     (prog1
+	 (let ((display-buffer-overriding-action
+		(or display-buffer-overriding-action
+		    '(display-buffer-same-window
+		      (inhibit-same-window . nil)))))
+	   ;; NORECORD nil because we *do* want the current buffer pushed to
+	   ;; the window's previous buffers.
+	   (pop-to-buffer-same-window (current-buffer)))
+       (push last-command-event unread-command-events)
+       (setq prev-buffers (window-prev-buffers)))))
+  (transient-cycles-buffer-ring-cycler
+   ;; The sense in which this command *re*starts transient cycling is how
+   ;; passing these arguments to `transient-cycles-buffer-siblings-ring' makes
+   ;; it return a ring of buffer siblings that's similar to the last one.
+   ;; The only differences should be that any new buffers have been inserted
+   ;; in the middle of the ring (i.e. far away from the current buffer, in
+   ;; either direction), and killed buffers have been taken out.
+   :ring (transient-cycles-buffer-siblings-ring
+	  ret-val
+	  (buffer-local-value 'transient-cycles--last-buffers-ring ret-val)
+	  (buffer-local-value 'transient-cycles--last-buffers-pos ret-val)))
+  :on-exit (progn (switch-to-buffer (current-buffer) nil t)
+		  (set-window-next-buffers nil nil)
+		  (set-window-prev-buffers nil prev-buffers))
+  :cycle-forwards-key transient-cycles-buffer-siblings-cycle-forwards-key
+  :cycle-backwards-key transient-cycles-buffer-siblings-cycle-backwards-key)
+
 (defvar transient-cycles-window-buffers-mode-map (make-sparse-keymap)
   "Keymap for `transient-cycles-window-buffers-mode'.")
 
@@ -435,7 +640,7 @@ defined by `transient-cycles-window-buffers-mode'."
 
 ;;;###autoload
 (define-minor-mode transient-cycles-window-buffers-mode
-    "Enhance window buffer switching commands by adding transient cycling.
+  "Enhance window buffer switching commands by adding transient cycling.
 
 Augments \\[previous-buffer] and \\[next-buffer].  After typing
 those commands, you can use
@@ -526,7 +731,7 @@ since then.  Otherwise, call `previous-buffer'."
 
 ;;;###autoload
 (define-minor-mode transient-cycles-tab-bar-mode
-    "Enhance tab switching commands by adding transient cycling.
+  "Enhance tab switching commands by adding transient cycling.
 
 Augments \\[tab-previous], \\[tab-next] and
 \\[tab-bar-switch-to-recent-tab].  After running those commands,
@@ -595,6 +800,439 @@ defined by `transient-cycles-tab-bar-mode'."
 	 (current-index (cl-position 'current-tab tabs :key #'car))
 	 (new-index (mod (+ n current-index) (length tabs))))
     (alist-get 'time (nth new-index tabs))))
+
+
+;;;; Shells
+
+(defcustom transient-cycles-shell-command 'shell
+  "Command to start your preferred transient cycling shell."
+  :type '(choice (const :tag "`shell-mode'" shell)
+		 (const :tag "Eshell" eshell))
+  :group 'transient-cycles)
+
+(defvar eshell-last-output-end)
+(declare-function eshell-quote-argument "esh-arg")
+(declare-function eshell-send-input "esh-mode")
+(declare-function comint-send-input "comint")
+
+;; We could have an optional argument to kill any input and reinsert it after
+;; running the command, and even restore point within that input.
+;; Might be useful in `transient-cycles-shells-jump' & interactively.
+(defun transient-cycles-shells-insert-and-send (&rest args)
+  (let ((args (if (cdr args)
+		  (cl-ecase transient-cycles-shell-command
+		    (eshell (string-join (mapcar #'eshell-quote-argument args)
+					 " "))
+		    (shell (combine-and-quote-strings args)))
+		(car args))))
+    (cl-ecase transient-cycles-shell-command
+      (eshell (delete-region eshell-last-output-end (point-max))
+	      (when (> eshell-last-output-end (point))
+		(goto-char eshell-last-output-end))
+	      (insert-and-inherit args)
+	      (eshell-send-input))
+      (shell (if-let* ((process (get-buffer-process (current-buffer))))
+		 (progn (goto-char (process-mark process))
+			(delete-region (point) (point-max))
+			(insert args)
+			(comint-send-input))
+	       (user-error "Current buffer has no process"))))))
+
+(defvar comint-prompt-regexp)
+(defvar eshell-buffer-name)
+(declare-function dired-current-directory "dired")
+(declare-function project-root "project")
+
+(defun transient-cycles-shells-jump (&optional chdir busy-okay)
+  "Pop to a recently-used shell that isn't busy, or start a fresh one.
+Return a ring for transient cycling among other shells, in the order of most
+recent use.  A shell is busy if there's a command running, or it's narrowed
+(in the latter case for Eshell, this was probably done with C-u C-c C-r).
+When BUSY-OKAY is `interactive', a shell is additionally considered busy
+when there is a partially-entered command.
+
+Non-nil CHDIR requests a shell that's related to `default-directory'.
+Specifically, if CHDIR is non-nil, pop to a shell in `default-directory',
+pop to a shell under the current project root and change its directory to
+`default-directory', or start a fresh shell in `default-directory'.
+If CHDIR is `project', use the current project root as `default-directory'.
+In `dired-mode', unless CHDIR is `strict', use the result of calling
+`dired-current-directory' as `default-directory'.
+
+Non-nil BUSY-OKAY requests ignoring whether shells are busy.  This makes
+it easy to return to shells with long-running commands.
+If BUSY-OKAY is `interactive', as it is interactively, ignore whether shells
+are busy unless there is a prefix argument, and unconditionally start a fresh
+shell if the prefix argument is 16 or greater (e.g. with C-u C-u).
+If BUSY-OKAY is `fresh', unconditionally start a fresh shell, whether or not
+a shell that isn't busy already exists.
+Any other non-nil value means to ignore whether shells are busy.
+
+If BUSY-OKAY is `interactive', `this-command' is equal to `last-command',
+and there is no prefix argument, set the prefix argument to the numeric
+value of the last prefix argument multiplied by 4, and also bind
+`display-buffer-overriding-action' to use the selected window.
+Thus, M-& M-& is equivalent to M-& C-u M-&, and M-& M-& M-& is equivalent to
+M-& C-u M-& C-u C-u M-&.  This streamlines the case where this command takes
+you to a buffer that's busy but you need one that isn't, but note that with
+the current implementation transient cycling is restarted, so the busy buffer
+will become the most recently selected buffer.
+
+Some ideas behind these behaviours are as follows.
+
+- Just like Lisp REPLs, we do not normally need a lot of different shells;
+  it is fine for shell history associated with different tasks to become
+  mixed together.  But we do require an easy way to start new shells when
+  other shells are already busy running commands.
+
+- Rename *shell* to *shell*<N>, but don't ever rename *shell*<N> back to
+  *shell*, because that is a conventional workflow -- stock Emacs's M-&,
+  C-h i, M-x ielm, M-x compile etc. always take you to the unnumbered buffer,
+  possibly renaming the numbered one out of the way.
+
+  We do nevertheless reuse shells, not for the sake of creating fewer, but
+  just so that this command can be used to get back to the most recent few
+  shells you were working in, to see output.
+
+- We'll sometimes use C-x 4 1 in front of this command, and if we're
+  already in a shell, we might use C-x 4 4 C-x <left>/<right> to cycle to
+  another shell in another window, or a sequence like M-& C-u M-&, which
+  doesn't bind `display-buffer-overriding-action'.
+
+- It's not especially convenient to distinguish between `project-shell'
+  and `shell' shells.  We just want a way to quickly obtain a shell in
+  the project root, and bind that to C-x p s.
+
+- Except when `this-command' is equal to `last-command', don't do anything
+  special when the current buffer is the one we'd pop to, as previous
+  versions of this command did.  That sort of context-dependent behavioural
+  variation reduces the speed with which one can use the command because
+  you have to think more about what it will do."
+  (interactive '(nil interactive))
+  (let* ((default-directory (or (and (not (eq chdir 'strict))
+				     (derived-mode-p 'dired-mode)
+				     (dired-current-directory))
+				default-directory))
+	 (current-project (and (not (file-remote-p default-directory))
+			       (project-current)))
+	 (proj-root (and current-project (project-root current-project)))
+	 (target-directory (expand-file-name (or (and (eq chdir 'project)
+						      proj-root)
+						 default-directory)))
+	 (again (and (not current-prefix-arg)
+		     (eq busy-okay 'interactive)
+		     (eq this-command last-command)))
+	 (display-buffer-overriding-action
+	  (if again '(display-buffer-same-window (inhibit-same-window . nil))
+	    display-buffer-overriding-action))
+	 (orig-busy-okay busy-okay)
+	 (mode (cl-ecase transient-cycles-shell-command
+		 (eshell 'eshell-mode)
+		 (shell 'shell-mode)))
+	 target-directory-shells other-shells
+	 most-recent-shell same-project-shell target-directory-shell)
+    ;; It's important that `transient-cycles-cmd-transient-cycles-shells-jump'
+    ;; never sees this prefix argument because it has its own meaning for C-u.
+    ;; This means that C-u M-! and M-! M-! are different, which is desirable.
+    ;;
+    ;; We could multiply by 16 if `last-prefix-arg' is nil and the current
+    ;; buffer is a shell that's not busy.  The idea would be that when M-&
+    ;; takes us to a non-busy buffer, a second M-& would only take us to the
+    ;; same buffer, so skip over that step and do C-u C-u M-&.
+    ;; However, this simpler design has the advantage that if I know I want a
+    ;; non-busy shell I can just hit M-& M-& without looking and I know I'll
+    ;; get the most recent non-busy shell in the right directory.
+    (when again
+      (setq current-prefix-arg (* 4 (prefix-numeric-value last-prefix-arg))))
+    (when (eq orig-busy-okay 'interactive)
+      (setq busy-okay (cond ((>= (prefix-numeric-value current-prefix-arg) 16)
+			     'fresh)
+			    ((not current-prefix-arg)
+			     t))))
+    (cl-flet
+	((busy-p (buffer)
+	   (cl-ecase transient-cycles-shell-command
+	     (eshell
+	      (or (get-buffer-process buffer)
+		  (with-current-buffer buffer
+		    (or (buffer-narrowed-p)
+			(and (eq orig-busy-okay 'interactive)
+			     (> (point-max) eshell-last-output-end))))))
+	     (shell
+	      (with-current-buffer buffer
+		(save-excursion
+		  (or (buffer-narrowed-p)
+		      (not (get-buffer-process buffer))
+		      (let ((pmark (process-mark
+				    (get-buffer-process buffer))))
+			(goto-char pmark)
+			(forward-line 0)
+			;; We can't rely on fields because of the case
+			;; where a running process has output (part of) a
+			;; line without (yet) a trailing newline.
+			;; There's no way to distinguish that from a shell
+			;; prompt without doing a regexp match.
+			(not
+			 (and (re-search-forward comint-prompt-regexp pmark t)
+			      (or (not (eq orig-busy-okay 'interactive))
+				  (eobp)))))))))))
+	 (fresh-shell ()
+	   (when-let* ((buffer (get-buffer
+				(cl-ecase transient-cycles-shell-command
+				  (eshell (require 'eshell)
+					  eshell-buffer-name)
+				  (shell "*shell*")))))
+	     (with-current-buffer buffer (rename-uniquely)))
+	   (let ((default-directory (if chdir
+					target-directory
+				      (expand-file-name "~/"))))
+	     (funcall transient-cycles-shell-command))))
+      (dolist (buffer (buffer-list))
+	(with-current-buffer buffer
+	  (when (derived-mode-p mode)
+	    (let ((in-target-p (and chdir (equal default-directory
+						 target-directory))))
+	      (push buffer
+		    (if in-target-p target-directory-shells other-shells))
+	      (cond ((and (not chdir)
+			  (not most-recent-shell)
+			  (or busy-okay (not (busy-p buffer))))
+		     (setq most-recent-shell buffer))
+		    ((and in-target-p
+			  (not target-directory-shell)
+			  (or busy-okay (not (busy-p buffer))))
+		     (setq target-directory-shell buffer))
+		    ((and chdir proj-root
+			  (not same-project-shell)
+			  ;; We'll change its directory so it mustn't be busy.
+			  (not (busy-p buffer))
+			  (file-in-directory-p default-directory proj-root))
+		     (setq same-project-shell buffer)))))))
+      (cond ((eq busy-okay 'fresh)
+	     (fresh-shell))
+	    ((and chdir target-directory-shell)
+	     (pop-to-buffer target-directory-shell))
+	    ((and chdir same-project-shell)
+	     (pop-to-buffer same-project-shell)
+	     (transient-cycles-shells-insert-and-send "cd" target-directory))
+	    (most-recent-shell		; CHDIR nil
+	     (pop-to-buffer most-recent-shell))
+	    (t
+	     (fresh-shell))))
+    ;; In an interactive call where we specifically requested a shell that's
+    ;; not busy, ensure it's ready for us to enter a command.
+    ;; Otherwise, it's useful to be able to jump back to exactly where we were
+    ;; in a shell, and when called from Lisp, let the caller decide what to
+    ;; do about where we are in the buffer, and about any partially-entered
+    ;; command (e.g. see `transient-cycles-shells-dired-copy-filename').
+    (when (and (not busy-okay) (eq orig-busy-okay 'interactive))
+      (goto-char (point-max)))
+    (let* ((all (delq (current-buffer)
+		      (nconc other-shells target-directory-shells)))
+	   (ring (make-ring (1+ (length all)))))
+      (dolist (buffer all)
+	(ring-insert ring buffer))
+      (ring-insert ring (current-buffer))
+      ring)))
+(put 'transient-cycles-shells-jump 'project-aware t)
+
+(declare-function dired-get-marked-files "dired")
+(declare-function dired-get-subdir "dired")
+
+(defun transient-cycles-shells-dired-copy-filename (&optional arg)
+  "Like `dired-copy-filename-as-kill' but copy file names to a shell buffer.
+This is instead of prompting for the command in the minibuffer.
+See `transient-cycles-shells-mode'."
+  (interactive "P")
+  (let* ((subdir (dired-get-subdir))
+	 (files
+          ;; We treat as primary the meanings of the prefix argument to
+	  ;; `dired-copy-filename-as-kill', then try to call
+	  ;; `transient-cycles-shells-jump' in a way that corresponds.
+	  ;; Thus, there isn't a way to express a prefix argument to M-&,
+	  ;; but can use, e.g., C-u C-u M-& C-x o &.
+	  ;; (It wouldn't make sense to pass a prefix argument to M-!.)
+	  ;;
+	  ;; Invoking with \\`!', and no prefix argument, is a shortcut for
+	  ;; copying absolute paths, and behaving more like M-! than M-&.
+	  (cond (subdir
+		 (transient-cycles-shells-jump)
+		 (ensure-list subdir))
+		((if arg
+		     (eql 0 arg)
+		   (char-equal last-command-event ?!))
+		 (prog1 (dired-get-marked-files)
+		   (transient-cycles-shells-jump)))
+		((eql 1 arg)
+		 ;; Don't call `project-current' in order to ensure we behave
+		 ;; just the same as `transient-cycles-shells-jump' when there
+		 ;; is no current project, without repeating its logic here.
+		 (cl-loop with files = (dired-get-marked-files)
+			  initially (transient-cycles-shells-jump 'project)
+			  for file in files
+			  collect (file-relative-name file
+						      default-directory)))
+                ((consp arg)
+                 (prog1 (dired-get-marked-files t)
+		   (transient-cycles-shells-jump 'strict)))
+                (t
+		 (prog1
+		     (dired-get-marked-files 'no-dir
+					     (and arg
+						  (prefix-numeric-value arg)))
+		   (transient-cycles-shells-jump t)))))
+	 (string (mapconcat (lambda (file)
+			      (if (string-match-p "[ \"']" file)
+				  (format "%S" file)
+				file))
+			    files
+			    " ")))
+    (unless (string-empty-p string)
+      (let* ((pmark (cl-ecase transient-cycles-shell-command
+		      (eshell eshell-last-output-end)
+		      (shell
+		       (if-let* ((proc (get-buffer-process (current-buffer))))
+			   (process-mark proc)
+			 (user-error "Current buffer has no process")))))
+	     (empty-p (= pmark (point-max))))
+	;; If we're somewhere else in the buffer, jump to the end.
+	;; This means that if you want to insert the filenames into an old
+	;; command you're editing, you have to C-c RET first.
+	(when (> pmark (point))
+	  (goto-char (point-max)))
+	(save-restriction
+	  (when (= pmark (point))
+	    (narrow-to-region (point) (point-max)))
+	  (just-one-space))
+	(insert string)
+	(just-one-space)
+	(when empty-p
+	  (goto-char pmark)
+	  ;; There is now also `shell-command-guess'.
+	  ;; (when-let* ((default (dired-guess-default files)))
+	  ;;   (if (listp default)
+	  ;; 	(let ((completion-at-point-functions
+	  ;; 	       (list (lambda () (list (point) (point) default)))))
+	  ;; 	  (completion-at-point))
+	  ;;     (insert default)))
+	  )))))
+
+(defvar transient-cycles-shells-mode-map (make-sparse-keymap)
+  "Keymap for `transient-cycles-shells-mode'.")
+
+(defvar dired-mode-map)
+(declare-function dired-do-shell-command "dired-aux")
+(declare-function dired-do-async-shell-command "dired-aux")
+
+;;;###autoload
+(define-minor-mode transient-cycles-shells-mode
+  "Replace system shell commands with transient cycling of shell buffers.
+
+Augments \\[project-shell] (or \\[project-eshell]) and completely replaces \\`M-!', \\`M-&',
+and Dired's \\`!' and \\`&' commands (but not \\`X').  These commands now all
+switch to shell buffers instead of doing minibuffer prompting.
+
+\\`M-!' always switches back to the most recently used shell.
+\\`M-&' switches to a shell in the current `default-directory'.
+\\[project-shell]/\\[project-eshell] are like \\`M-&' but using the project root.
+
+For \\[project-shell]/\\[project-eshell], \\`M-!' and \\`M-&', type the command twice in a row
+to skip over shell buffers already occupied by running commands.
+Type the command a third time for a newly created shell buffer.
+
+In addition, after running those commands, you can use
+`transient-cycles-shells-cycle-backwards-key' and
+`transient-cycles-shells-cycle-forwards-key' to select a different shell
+buffer instead.
+
+See also `transient-cycles-cmd-transient-cycles-siblings-from-here'."
+  :lighter nil :keymap transient-cycles-shells-mode-map :global t
+  :group 'transient-cycles
+  ;; We need to bind into `project-prefix-map', rather than adding a remap
+  ;; to our own minor mode map, so that we have the command under C-x 4 p,
+  ;; C-x 5 p and C-x t p too.
+  (require 'project)
+  (cl-ecase transient-cycles-shell-command
+    (eshell
+     (define-key project-prefix-map "e"
+		 (if transient-cycles-shells-mode
+		     #'transient-cycles-cmd-transient-cycles-shells-project
+		   #'project-eshell)))
+    (shell
+     (define-key project-prefix-map "s"
+		 (if transient-cycles-shells-mode
+		     #'transient-cycles-cmd-transient-cycles-shells-project
+		   #'project-shell))))
+
+  ;; Note that \\`X' remains bound to `dired-do-shell-command', and adding a
+  ;; \\`&' to the end of the input gets you `dired-do-async-shell-command'.
+  (require 'dired)
+  (define-key dired-mode-map "!"
+	      (if transient-cycles-shells-mode
+		  #'transient-cycles-shells-dired-copy-filename
+		#'dired-do-shell-command))
+  (define-key dired-mode-map "&"
+	      (if transient-cycles-shells-mode
+		  #'transient-cycles-shells-dired-copy-filename
+		#'dired-do-async-shell-command)))
+
+(defcustom transient-cycles-shells-cycle-backwards-key [left]
+  "Key to cycle backwards in the transient maps set by commands
+defined by `transient-cycles-shells-mode'."
+  :type 'key-sequence
+  :group 'transient-cycles)
+
+(defcustom transient-cycles-shells-cycle-forwards-key [right]
+  "Key to cycle forwards in the transient maps set by commands
+defined by `transient-cycles-shells-mode'."
+  :type 'key-sequence
+  :group 'transient-cycles)
+
+(transient-cycles-define-buffer-switch
+  ((("\M-!" . transient-cycles-shells-jump) (arg)
+     (interactive "p")
+     (cl-ecase transient-cycles-shell-command
+       (eshell
+	(let ((>>> (and (> arg 1) (format " >>>#<buffer %s>" (buffer-name)))))
+	  (prog1 (transient-cycles-shells-jump (> arg 4)
+					       (and (= arg 1) 'interactive))
+	    (when >>>
+	      (let ((there (save-excursion
+			     (goto-char (point-max))
+			     (skip-syntax-backward "\\s-")
+			     (- (point) (length >>>)))))
+		(unless (and (>= there 0)
+			     (equal >>> (buffer-substring there (point-max))))
+		  (save-excursion
+		    (goto-char (point-max))
+		    (insert >>>)
+		    (backward-char (length >>>))
+		    (when (> (point) eshell-last-output-end)
+		      (just-one-space)))))))))
+       (shell
+	(if (> arg 1)
+	    (progn (call-interactively #'shell-command)
+		   nil)			; disable transient cycling
+	  (transient-cycles-shells-jump nil 'interactive)))))
+   (("\M-&" . transient-cycles-shells-jump-from-here) ()
+     (interactive)
+     (transient-cycles-shells-jump t 'interactive)))
+  :keymap transient-cycles-shells-mode-map
+  :cycle-forwards-key transient-cycles-shells-cycle-forwards-key
+  :cycle-backwards-key transient-cycles-shells-cycle-backwards-key)
+
+(transient-cycles-define-buffer-switch
+  ((transient-cycles-shells-project ()
+     (interactive)
+     (prog1 (transient-cycles-shells-jump 'project 'interactive)
+       ;; Make it possible to use M-& to repeat C-x p s / C-x p e.
+       (let ((map (make-sparse-keymap)))
+	 (define-key map "\M-&"
+		     #'transient-cycles-cmd-transient-cycles-shells-project)
+	 (set-transient-map map)))))
+  :cycle-forwards-key transient-cycles-shells-cycle-forwards-key
+  :cycle-backwards-key transient-cycles-shells-cycle-backwards-key)
+(put 'transient-cycles-cmd-transient-cycles-shells-project 'project-aware t)
 
 (provide 'transient-cycles)
 
